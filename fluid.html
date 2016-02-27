@@ -1,0 +1,547 @@
+<html>
+<head>
+<script src='three/three.min.js' type='text/javascript'></script>
+<script src='jquery-1.11.3.min.js' type='text/javascript'></script>
+<script src='DoubleBuffer.js' type='text/javascript'></script>
+<script src='Surface.js' type='text/javascript'></script>
+<script src='ShaderPass.js' type='text/javascript'></script>
+<script type='x-shader/x-fragment' id='vertex'>
+	varying vec2 vUv;
+
+	void main()
+	{
+		vUv = uv;
+		gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0);
+	}
+</script>
+<script type='x-shader/x-fragment' id='blit'>
+	varying vec2 vUv;
+	uniform sampler2D tex;
+
+	void main()
+	{
+		gl_FragColor = texture2D(tex, vUv);
+	}
+</script>
+<script type='x-shader/x-fragment' id='clear'>
+	varying vec2 vUv;
+	uniform vec3 clearColor;
+
+	void main()
+	{
+		gl_FragColor = vec4(clearColor, 1.0);
+	}
+</script>
+<script type='x-shader/x-fragment' id='obstacles'>
+	varying vec2 vUv;
+
+	uniform vec2 pos;
+	uniform vec2 resolution;
+	uniform float radius;
+
+	void main()
+	{
+		if(gl_FragCoord.x < 1.0 || gl_FragCoord.x > resolution.x - 1.0 ||
+		   gl_FragCoord.y < 1.0 || gl_FragCoord.y > resolution.y - 1.0)
+		{
+			gl_FragColor = vec4(1.0, 0.0, 0.0, 0.0);
+			return;
+		}
+
+		float dist = distance(gl_FragCoord.xy, pos);
+		gl_FragColor = vec4(1.0 - step(radius, dist), 0.0, 0.0, 0.0);
+	}
+</script>
+<script type='x-shader/x-fragment' id='advection'>
+	varying vec2 vUv;
+
+	uniform sampler2D velocity;
+	uniform sampler2D source;
+	uniform sampler2D obstacles;
+	uniform vec2 invSize;
+	uniform float dt;
+	uniform float drag;
+
+	void main()
+	{
+		float obstacle = texture2D(obstacles, invSize * gl_FragCoord.xy).x;
+		if(obstacle > 0.0)
+		{
+			gl_FragColor = vec4(0.0);
+			return;
+		}
+
+		vec2 pos = invSize * (gl_FragCoord.xy - dt * texture2D(velocity, invSize * gl_FragCoord.xy).xy);
+		gl_FragColor = drag * texture2D(source, pos);
+	}
+</script>
+<script type='x-shader/x-fragment' id='divergence'>
+	varying vec2 vUv;
+
+	uniform sampler2D velocity;
+	uniform sampler2D obstacles;
+	uniform vec2 ires;
+	uniform float halfInvSize;
+
+	void main()
+	{
+
+		float t = texture2D(velocity, vUv + vec2( 0.,  ires.y)).y;
+		float b = texture2D(velocity, vUv + vec2( 0., -ires.y)).y;
+		float l = texture2D(velocity, vUv + vec2(-ires.x,  0.)).x;
+		float r = texture2D(velocity, vUv + vec2( ires.x,  0.)).x;
+
+		float ot = texture2D(obstacles, vUv + vec2( 0.,  ires.y)).x;
+		float ob = texture2D(obstacles, vUv + vec2( 0., -ires.y)).x;
+		float ol = texture2D(obstacles, vUv + vec2(-ires.x,  0.)).x;
+		float or = texture2D(obstacles, vUv + vec2( ires.x,  0.)).x;
+
+		t = ot > 0.0 ? 0.0 : t;
+		b = ob > 0.0 ? 0.0 : b;
+		l = ol > 0.0 ? 0.0 : l;
+		r = or > 0.0 ? 0.0 : r;
+
+		gl_FragColor = vec4(halfInvSize * ((r - l) + (t - b)));
+	}
+</script>
+<script type='x-shader/x-fragment' id='jacobi'>
+	varying vec2 vUv;
+
+	uniform sampler2D pressure;
+	uniform sampler2D divergence;
+	uniform sampler2D obstacles;
+	uniform vec2 ires;
+	uniform float alpha;
+	uniform float invBeta;
+
+	void main()
+	{
+		vec4 t = texture2D(pressure, vUv + vec2( 0.,  ires.y));
+		vec4 b = texture2D(pressure, vUv + vec2( 0., -ires.y));
+		vec4 l = texture2D(pressure, vUv + vec2(-ires.x,  0.));
+		vec4 r = texture2D(pressure, vUv + vec2( ires.x,  0.));
+		vec4 c = texture2D(pressure, vUv);
+
+		float ot = texture2D(obstacles, vUv + vec2( 0.,  ires.y)).x;
+		float ob = texture2D(obstacles, vUv + vec2( 0., -ires.y)).x;
+		float ol = texture2D(obstacles, vUv + vec2(-ires.x,  0.)).x;
+		float or = texture2D(obstacles, vUv + vec2( ires.x,  0.)).x;
+
+		t = ot > 0.0 ? c : t;
+		b = ob > 0.0 ? c : b;
+		l = ol > 0.0 ? c : l;
+		r = or > 0.0 ? c : r;
+
+		vec4 bC = texture2D(divergence, vUv);
+		gl_FragColor = (t + b + l + r + bC * alpha) * invBeta;
+	}
+</script>
+<script type='x-shader/x-fragment' id='subgradient'>
+	varying vec2 vUv;
+
+	uniform sampler2D velocity;
+	uniform sampler2D pressure;
+	uniform sampler2D obstacles;
+	uniform vec2 ires;
+	uniform float invSize;
+
+	void main()
+	{
+		float obstacle = texture2D(obstacles, vUv).x;
+		if(obstacle > 0.0)
+		{
+			gl_FragColor = vec4(0.0);
+			return;
+		}
+
+		float t = texture2D(pressure, vUv + vec2( 0.,  ires.y)).x;
+		float b = texture2D(pressure, vUv + vec2( 0., -ires.y)).x;
+		float l = texture2D(pressure, vUv + vec2(-ires.x,  0.)).x;
+		float r = texture2D(pressure, vUv + vec2( ires.x,  0.)).x;
+		float c = texture2D(pressure, vUv).x;
+
+		float ot = texture2D(obstacles, vUv + vec2( 0.,  ires.y)).x;
+		float ob = texture2D(obstacles, vUv + vec2( 0., -ires.y)).x;
+		float ol = texture2D(obstacles, vUv + vec2(-ires.x,  0.)).x;
+		float or = texture2D(obstacles, vUv + vec2( ires.x,  0.)).x;
+
+		vec2 vMask = vec2(1.0);
+
+		if(ot > 0.0) {t = c; vMask.y = 0.0;}
+		if(ob > 0.0) {b = c; vMask.y = 0.0;}
+		if(ol > 0.0) {l = c; vMask.x = 0.0;}
+		if(or > 0.0) {r = c; vMask.x = 0.0;}
+
+		vec2 prev = texture2D(velocity, vUv).xy;
+		vec2 newVel = prev - invSize * vec2(r - l, t - b);
+		gl_FragColor = vec4(vMask * newVel, 0.0, 0.0);
+	}
+</script>
+<script type='x-shader/x-fragment' id='swipe-force'>
+	varying vec2 vUv;
+
+	uniform sampler2D velocity;
+	uniform sampler2D obstacles;
+
+	uniform vec2 viewportScale;
+	uniform vec2 point;
+	uniform vec2 direction;
+	uniform float force;
+	uniform float radius;
+	uniform float dt;
+
+	void main()
+	{
+		float obstacle = texture2D(obstacles, vUv).x;
+		if(obstacle > 0.0)
+		{
+			gl_FragColor = vec4(0.0);
+			return;
+		}
+
+		vec4 vel = texture2D(velocity, vUv);
+		float dist = distance(gl_FragCoord.xy * viewportScale, point);
+		vec2 accel = dt * force * direction * exp(-6.0 * pow(dist/radius, 3.0));
+
+		gl_FragColor = vel  + vec4(accel, 0.0, 0.0);
+	}
+</script>
+<script type='x-shader/x-fragment' id='density-fill'>
+	varying vec2 vUv;
+
+	#define compress(n)((n + 1.0) * 0.5)
+
+	void main()
+	{
+		float r = sin(vUv.x * 6.28) * sin(vUv.y * 6.28 + 4.0);
+		float g = sin(vUv.x * 6.28 + 2.0) * sin(vUv.y * 6.28 + 2.0);
+		float b = sin(vUv.x * 6.28 + 4.0) * sin(vUv.y * 6.28);
+		gl_FragColor = vec4(r, g, b, 1.0);
+	}
+</script>
+<script>
+window.addEventListener('load', init);
+
+var width = 256;
+var height = 256;
+var viewportScale = new THREE.Vector2(2, 2);
+
+var scene;
+var camera;
+var renderer;
+
+var resolution = new THREE.Vector2(width, height);
+var invSize = new THREE.Vector2(1.0/width, 1.0/height);
+var drag = 1;
+var cellsize = 4.0;
+var gridScale = 1.0 / cellsize;
+var jacobiIterations = 40;
+
+// Swipe force variables
+var mouseDown = 0;
+var dragged = 0;
+var prevPoint;
+var curPoint;
+var swipeForce = 900;
+var standardDist = 1;
+var effectRadius = width * 0.2;
+
+
+function init()
+{
+// -------------------------------------------------------
+// GENERAL SETUP
+// -------------------------------------------------------
+	renderer = new THREE.WebGLRenderer();
+	renderer.setSize(width * viewportScale.x, height * viewportScale.y);
+
+	var fpsbox = document.createElement('div');
+	fpsbox.setAttribute('id', 'fps');
+	document.getElementById('container').appendChild(fpsbox);
+	document.getElementById('container').appendChild(renderer.domElement);
+
+	scene = new THREE.Scene();
+	camera = new THREE.PerspectiveCamera(45, width/height, 1, 1000);
+	camera.position.z = 100;
+	camera.lookAt(new THREE.Vector3(0, 0, 0));
+	scene.add(camera);
+
+	var vertexSource = document.getElementById('vertex').textContent;
+
+// -------------------------------------------------------
+// SETUP UTILITY SHADERS
+// -------------------------------------------------------
+
+	// A very round-about way of clearing a buffer
+	var clearMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			clearColor: 	{type: 'v3',  value: new THREE.Vector3(0, 0, 0)}
+		},
+		vertexShader: vertexSource,
+		fragmentShader: document.getElementById('clear').textContent
+	});
+	var clear = new ShaderPass(renderer, width, height, clearMaterial);
+
+	// Used for debugging contents of buffers/copying from one buffer to another
+	var blitMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			tex: 			{type: 't',   value: null}
+		},
+		vertexShader: vertexSource,
+		fragmentShader: document.getElementById('blit').textContent
+	});
+	var blit = new Surface(renderer, width, height, THREE.RGBFormat, THREE.FloatType, blitMaterial, 'tex');
+
+	var densityFillMaterial = new THREE.ShaderMaterial({
+		uniforms: {},
+		vertexShader: vertexSource,
+		fragmentShader: document.getElementById('density-fill').textContent
+	});
+	var dfill = new ShaderPass(renderer, width, height, densityFillMaterial);
+
+// -------------------------------------------------------
+// SETUP BOUNDS/OBSTACLES
+// -------------------------------------------------------
+	var obsMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			pos: 			{type: 'v2',  value: new THREE.Vector2(width/2, height/2)},
+			resolution: 	{type: 'v2',  value: new THREE.Vector2(width, height)},
+			radius: 		{type: 'f',   value: width * 0.2}
+		},
+		vertexShader: vertexSource,
+		fragmentShader: document.getElementById('obstacles').textContent
+	});
+	var bounds = new Surface(renderer, width, height, THREE.RGBFormat, THREE.UnsignedByteType, obsMaterial);
+	bounds.render(null, bounds.buffer);
+
+	// DEBUG
+	//renderer.render(bounds.scene, bounds.camera);
+
+// -------------------------------------------------------
+// SETUP SIMULATION MATERIALS/BUFFERS/SHADERS
+// -------------------------------------------------------
+	var advectionMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			velocity: 			{type: 't',  value: null},
+			source: 	        {type: 't',  value: null},
+			obstacles: 			{type: 't',  value: bounds.buffer},
+			invSize: 			{type: 'v2', value: invSize},
+			dt: 			  	{type: 'f',  value: null},
+			drag: 				{type: 'f',  value: drag}
+		},
+		vertexShader: vertexSource,
+		fragmentShader: document.getElementById('advection').textContent
+	});
+	var advection = new DoubleBuffer(renderer, width, height, THREE.RGBFormat, THREE.FloatType, advectionMaterial, 'source');
+	var density   = new DoubleBuffer(renderer, width, height, THREE.RGBFormat, THREE.FloatType, advectionMaterial, 'source');
+	dfill.render(null, density.back);
+
+
+	var swipeMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			velocity: 			{type: 't',  value: null},
+			obstacles: 			{type: 't',  value: bounds.buffer},
+			viewportScale: 		{type: 'v2', value: viewportScale},
+			point: 				{type: 'v2', value: null},
+			direction: 			{type: 'v2', value: null},
+			force: 				{type: 'f',  value: null},
+			radius: 			{type: 'f',  value: effectRadius},
+			dt: 			  	{type: 'f',  value: null}
+		},
+		vertexShader: vertexSource,
+		fragmentShader: document.getElementById('swipe-force').textContent
+	});
+	var swipe = new ShaderPass(renderer, width, height, swipeMaterial, 'velocity');
+
+	var divergenceMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			velocity: 			{type: 't',  value: null},
+			obstacles: 			{type: 't',  value: bounds.buffer},
+			ires: 				{type: 'v2', value: invSize},
+			halfInvSize: 	    {type: 'f',  value: 0.5/cellsize}
+		},
+		vertexShader: vertexSource,
+		fragmentShader: document.getElementById('divergence').textContent
+	});
+	var divergence = new Surface(renderer, width, height, THREE.RGBFormat, THREE.FloatType, divergenceMaterial, 'velocity', null, THREE.NearestFilter);
+
+	var jacobiMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			pressure: 			{type: 't',  value: null},
+			divergence: 	    {type: 't',  value: null},
+			obstacles: 			{type: 't',  value: bounds.buffer},
+			ires: 				{type: 'v2', value: invSize},
+			alpha: 			    {type: 'f',  value: -cellsize * cellsize},
+			invBeta: 			{type: 'f',  value: 0.25}
+		},
+		vertexShader: vertexSource,
+		fragmentShader: document.getElementById('jacobi').textContent
+	});
+	var pressure = new DoubleBuffer(renderer, width, height, THREE.RGBFormat, THREE.FloatType, jacobiMaterial, 'pressure', null, THREE.NearestFilter);
+
+	var subgradientMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			velocity: 			{type: 't',  value: null},
+			pressure: 	        {type: 't',  value: null},
+			obstacles: 			{type: 't',  value: bounds.buffer},
+			ires: 				{type: 'v2', value: invSize},
+			invSize: 			{type: 'f',  value: gridScale}
+		},
+		vertexShader: vertexSource,
+		fragmentShader: document.getElementById('subgradient').textContent
+	});
+	var subtractGradient = new ShaderPass(renderer, width, height, subgradientMaterial, 'velocity', null, THREE.NearestFilter);
+
+// -------------------------------------------------------
+// MOUSEDOWN HANDLERS
+// -------------------------------------------------------
+
+	var offset = $(renderer.domElement).offset();
+	function getMouseCoords(e)
+	{
+		var x = (e.pageX - offset.left);
+		var y = height * 2 - (e.pageY - offset.top);
+		return new THREE.Vector2(x, y);
+	};
+
+	renderer.domElement.addEventListener('mousedown', function(e)
+	{
+		mouseDown = 1;
+		curPoint = getMouseCoords(e);
+	});
+
+	document.addEventListener('mouseup', function(e)
+	{
+		mouseDown = 0;
+		dragged = 0;
+	});
+
+	renderer.domElement.addEventListener('mousemove', function(e)
+	{
+		if(!mouseDown)
+			return;
+
+		prevPoint = curPoint;
+		curPoint = getMouseCoords(e);
+		dragged = 1;
+	});
+
+// -------------------------------------------------------
+// SIMULATION LOGIC
+// -------------------------------------------------------
+
+	var prevTime = (new Date()).getTime();
+	var fps = document.getElementById('fps');
+	var elapsedFrames = 0;
+	var elapsedTime = 0;
+	function simulate()
+	{
+		// calc/set time values
+		var time = (new Date()).getTime();
+		var dt = (time - prevTime) * 0.001;
+		prevTime = time;
+
+		++elapsedFrames;
+		elapsedTime += dt;
+		if(elapsedTime > 1)
+		{
+			console.log(elapsedTime, elapsedFrames);
+			fps.innerHTML = '' + Math.floor(elapsedFrames/elapsedTime) + ' FPS';
+			elapsedFrames = elapsedTime = 0;
+		}
+
+		advectionMaterial.uniforms.velocity.value = advection.back;
+		advectionMaterial.uniforms.dt.value = dt;
+		advection.render(advection.back, advection.front);
+		advection.swap();
+
+		advectionMaterial.uniforms.velocity.value = advection.back;
+		advection.render(density.back, density.front);
+		density.swap();
+
+		if(mouseDown === 1 && dragged === 1)
+		{
+			if(!curPoint || !prevPoint)
+			{
+				console.log(curPoint, prevPoint);
+			}
+
+			var direction = new THREE.Vector2();
+			direction.subVectors(curPoint, prevPoint);
+			var dist = direction.length();
+
+			// Normalize the direction
+			direction.divideScalar(dist);
+
+			// Scale the force based on the length (and, therefore, the speed) of the swipe.
+			var force = swipeForce * (dist/standardDist);
+
+			swipeMaterial.uniforms.point.value = curPoint;
+			swipeMaterial.uniforms.direction.value = direction;
+			swipeMaterial.uniforms.force.value = force;
+			swipeMaterial.uniforms.dt.value = dt;
+			swipe.render(advection.back, advection.front);
+			advection.swap();
+		}
+
+		divergence.render(advection.back, divergence.buffer);
+
+		clear.render(null, pressure.back);
+		jacobiMaterial.uniforms.divergence.value = divergence.buffer;
+		for(var i = 0; i < jacobiIterations; i++)
+		{
+			pressure.render(pressure.back, pressure.front);
+			pressure.swap();
+		}
+
+		subgradientMaterial.uniforms.pressure.value = pressure.back;
+		subtractGradient.render(advection.back, advection.front);
+		advection.swap();
+
+		blit.render(density.back, null);
+
+		dragged = 0;
+
+		requestAnimationFrame(simulate);
+	}
+
+	requestAnimationFrame(simulate);
+
+	console.log("done!");
+};
+
+</script>
+
+<link href='https://fonts.googleapis.com/css?family=Fira+Sans:400,300,500' rel='stylesheet' type='text/css'>
+<style>
+	body {
+		background-color: #141516;
+		width: 100%;
+	}
+	#demo-title {
+		color: #efefef;
+		font-family: "Fira Sans", sans-serif;
+		text-align: center;
+		padding-top: 50px;
+	}
+
+	#container {
+		width: 512px;
+		display: block;
+		margin: 0 auto;
+	}
+	#fps {
+		position: relative;
+		top: 30px;
+		left: 10px;
+		color: #efefef;
+		font-family: "Fira Sans", sans-serif;
+	}
+</style>
+
+</head>
+<body id='theBody'>
+	<h2 id='demo-title'>Fluid Test</h2>
+	<div id='container'></div>
+</body>
+</html>
