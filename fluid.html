@@ -306,7 +306,7 @@ function init()
 		uniforms: {
 			pos: 			{type: 'v2',  value: new THREE.Vector2(width/2, height/2)},
 			resolution: 	{type: 'v2',  value: new THREE.Vector2(width, height)},
-			radius: 		{type: 'f',   value: width * 0.2}
+			radius: 		{type: 'f',   value: width * 0.0} // Change to add a circular obstacle in the middle of the simulation
 		},
 		vertexShader: vertexSource,
 		fragmentShader: document.getElementById('obstacles').textContent
